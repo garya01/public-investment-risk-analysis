@@ -1,0 +1,599 @@
+---
+title: "Public Investment Risk Analysis in the Dominican Republic"
+author: "Gari Jerez"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    theme: cosmo
+---
+
+## 1. Introduction
+
+This project analyzes public investment projects using data from the Ministry of Economy, Planning and Development (MEPyD).\
+The objective is to evaluate project performance using financial indicators such as Net Present Value (NPV), sector investment trends, and risk simulation using Monte Carlo methods.
+
+######################################## 
+
+# 2. Libraries
+
+######################################## 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+library(tidyverse)
+library(openxlsx)
+library(readxl)
+library(tidyr)
+library(ggthemes)
+library(scales)
+library(knitr)
+library(plotly)
+library(sf)
+library(stringi)
+library(stringr)
+library(ggrepel)
+library(viridis)
+library(FinCal)
+library(kableExtra)
+library(ggwordcloud)
+library(DT)
+```
+
+######################################## 
+
+# 3. Load Data
+
+######################################## 
+
+```{r data, include=TRUE}
+mepyd <- read_xlsx("data/datosabiertosproyectos.xlsx")
+pib <- read_xlsx("data/pib.xlsx")
+```
+
+######################################## 
+
+# 4. Data Cleaning
+
+######################################## 
+
+```{r dataclean, echo=FALSE}
+#convertir las variables
+mepyd <- mepyd %>%
+  mutate(
+    valorejecutado = as.numeric(gsub(",", "", valorejecutado)),
+    CostoEstimadoProyecto = as.numeric(gsub(",", "", CostoEstimadoProyecto)),
+    AnioInicioProyecto = as.numeric(AnioInicioProyecto),
+    AnioFinProyecto = as.numeric(AnioFinProyecto),
+    AnioEjecucionPptal = as.numeric(gsub("[^0-9]", "", AnioEjecucionPptal))
+  )
+#proyectos ejecutados
+ejecutados <- mepyd %>%
+  filter(!is.na(IdProyecto),
+         !is.na(AnioEjecucionPptal),
+         !is.na(valorejecutado),
+         CostoEstimadoProyecto > 0
+         )
+#duracion de los proyectos
+# Duración real del proyecto según ejecución
+duracion <- ejecutados %>%
+  group_by(IdProyecto) %>%
+  summarise(
+    anio_inicio_real = min(AnioEjecucionPptal, na.rm = TRUE),
+    anio_fin_real = max(AnioEjecucionPptal, na.rm = TRUE),
+    duracion_real = anio_fin_real - anio_inicio_real + 1
+  )
+
+#flujo por tiempo de proyecto
+flujo_anual <- ejecutados %>%
+  select(
+    IdProyecto, nombreregion, nombreprovincia, AnioInicioProyecto, AnioFinProyecto,
+    NombreProyecto, DuracionEstimadaProyecto, EtapaActual, Sector, nombreproducto,
+    entidadejecutora, fuentefinanciacion, AnioEjecucionPptal, valorejecutado, CostoEstimadoProyecto
+  ) %>%
+  group_by(IdProyecto, AnioEjecucionPptal) %>%
+  summarise(
+    beneficio_anual = sum(valorejecutado, na.rm = TRUE),
+    nombre_proyecto = first(NombreProyecto),
+    producto = first(nombreproducto),
+    sector = first(Sector),
+    etapa = first(EtapaActual),
+    ejecutora = first(entidadejecutora),
+    fuente = first(fuentefinanciacion),
+    anio_inicio = first(AnioInicioProyecto),
+    anio_fin = first(AnioFinProyecto),
+    duracion_estim = first(DuracionEstimadaProyecto),
+    provincia = first(nombreprovincia),
+    region = first(nombreregion),
+    costo_estimado = first(CostoEstimadoProyecto),
+    .groups = 'drop'
+  ) %>%
+  left_join(duracion, by = "IdProyecto") %>%
+  mutate(anio_relativo = AnioEjecucionPptal - anio_inicio_real + 1) %>%
+  arrange(IdProyecto, AnioEjecucionPptal)
+
+#datable
+datatable(
+  flujo_anual %>%
+    select(
+      IdProyecto,
+      Proyecto = nombre_proyecto,
+      Sector = sector,
+      Provincia = provincia,
+      Año = AnioEjecucionPptal,
+      `Flujo (RD$)` = beneficio_anual
+    ) %>%
+    head(20),
+  options = list(pageLength = 10, scrollX = TRUE),
+  rownames = FALSE,
+  caption = "Table 4.1 Preview of Cleaned Data"
+)
+```
+
+######################################## 
+
+# 5. Net Present Value Calculation
+
+######################################## 
+
+The Net Present Value (NPV) of each project is calculated using a discount rate of 12%.\
+The indicator measures the economic profitability of each investment project by discounting future execution flows to their present value.
+
+```{r npv-calculation, echo=FALSE}
+
+# Discount rate
+t_desc <- 0.12
+
+# Calculate NPV per project
+vpn <- flujo_anual %>%
+  mutate(flujo_desc = beneficio_anual / ((1 + t_desc) ^ anio_relativo)) %>%
+  group_by(IdProyecto) %>%
+  summarise(
+    vpn = sum(flujo_desc, na.rm = TRUE),
+    costo = first(costo_estimado),
+    sector = first(sector),
+    duracion = first(duracion_real),
+    .groups = 'drop'
+  ) %>%
+  mutate(vpn_neto = vpn - costo)
+
+# Merge duration information
+ej_fin <- vpn %>%
+  left_join(duracion, by = "IdProyecto")
+
+# Sector level summary
+resumen_sector <- ej_fin %>%
+  group_by(sector) %>%
+  summarise(
+    n_proyectos = n(),
+    vpn_prom = mean(vpn_neto, na.rm = TRUE),
+    vpn_total = sum(vpn_neto, na.rm = TRUE),
+    duracion_prom = mean(duracion, na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+datatable(
+  resumen_sector,
+  options = list(scrollX = TRUE, pageLength = 8),
+  caption = "NPV by sector"
+)
+```
+
+------------------------------------------------------------------------
+
+## Net Present Value by Sector
+
+The following table summarizes the average and total NPV by sector.
+
+```{r table-npv-sector, echo=FALSE}
+
+library(DT)
+
+datatable(
+  resumen_sector %>%
+    arrange(desc(vpn_total)) %>%
+    mutate(
+      `Avg NPV (RD$)` = scales::comma(vpn_prom),
+      `Total NPV (RD$)` = scales::comma(vpn_total),
+      `Avg Duration` = round(duracion_prom, 2)
+    ) %>%
+    select(
+      Sector = sector,
+      Projects = n_proyectos,
+      `Avg NPV (RD$)`,
+      `Total NPV (RD$)`,
+      `Avg Duration`
+    ),
+  
+  options = list(
+    pageLength = 8,
+    scrollX = TRUE,
+    autoWidth = TRUE,
+    dom = 'Bfrtip',
+    buttons = c('copy', 'csv', 'excel'),
+    columnDefs = list(
+      list(className = 'dt-left', targets = 0),
+      list(className = 'dt-right', targets = 1:4)
+    )
+  ),
+  
+  rownames = FALSE,
+  caption = htmltools::tags$caption(
+    style = 'caption-side: top; text-align: left;',
+    'Table 5.1 Net Present Value by Sector'
+  )
+
+)
+```
+
+------------------------------------------------------------------------
+
+## Distribution of Net Present Value
+
+To understand the variability in project profitability, the distribution of NPV values is visualized below.
+
+```{r npv-distribution, echo=FALSE, fig.cap="Figure 5.1 Distribution of Net Present Value across Projects", fig.align="center", out.width="90%"}
+
+#eliminar outliers correctamente (mejor que -1e9)
+p1 <- quantile(ej_fin$vpn_neto, 0.01, na.rm = TRUE)
+p99 <- quantile(ej_fin$vpn_neto, 0.99, na.rm = TRUE)
+
+ggplot(ej_fin %>% filter(vpn_neto >= p1 & vpn_neto <= p99),
+       aes(x = vpn_neto)) +
+  
+  geom_histogram(
+    fill = "steelblue",
+    bins = 50,
+    color = "white",
+    alpha = 0.9
+  ) +
+  
+  scale_x_continuous(labels = scales::comma) +
+  
+  labs(
+    title = "Distribution of Net Present Value",
+    x = "Net Present Value (RD$)",
+    y = "Number of Projects"
+  ) +
+  
+  theme_minimal() +
+  
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    axis.text = element_text(size = 10)
+  )
+
+```
+
+------------------------------------------------------------------------
+
+## Top Projects by Net Present Value
+
+The following table lists the ten projects with the highest net present value.
+
+```{r table-top-npv, echo=FALSE}
+
+top_proyectos <- ej_fin %>%
+  left_join(flujo_anual %>% 
+              select(IdProyecto, nombre_proyecto) %>% 
+              distinct(),
+            by="IdProyecto") %>%
+  arrange(desc(vpn_neto)) %>%
+  select(
+    Project = nombre_proyecto,
+    Sector = sector,
+    Duration = duracion,
+    `NPV (RD$)` = vpn_neto
+  ) %>%
+  head(10)
+
+datatable(
+  top_proyectos %>%
+    mutate(`NPV (RD$)` = scales::comma(`NPV (RD$)`)),
+  options = list(
+    pageLength = 10,
+    scrollX = TRUE
+  ),
+  rownames = FALSE,
+  caption = "Table 5.2 Top 10 Projects by Net Present Value"
+)
+
+```
+
+######################################## 
+
+# 6. Relationship Between Duration and NPV
+
+######################################## 
+
+```{r relations, echo=FALSE, fig.cap="Figure 6. Relationship Between Project Duration and Net Present Value", fig.align="center", out.width="90%"}
+
+#eliminar outliers de forma consistente
+p1 <- quantile(ej_fin$vpn_neto, 0.01, na.rm = TRUE)
+p99 <- quantile(ej_fin$vpn_neto, 0.99, na.rm = TRUE)
+
+ej_fin_filtrado <- ej_fin %>%
+  filter(vpn_neto >= p1 & vpn_neto <= p99)
+
+#gráfico
+ggplot(ej_fin_filtrado, aes(x = duracion, y = vpn_neto)) +
+  
+  geom_point(
+    color = "darkorange",
+    alpha = 0.6,
+    size = 2
+  ) +
+  
+  geom_smooth(
+    method = "lm",
+    se = FALSE,
+    color = "black",
+    linewidth = 1
+  ) +
+  
+  scale_y_continuous(labels = scales::comma) +
+  
+  labs(
+    title = "Relationship Between Project Duration and Net Present Value",
+    x = "Project Duration (Years)",
+    y = "Net Present Value (RD$)"
+  ) +
+  
+  theme_minimal() +
+  
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    axis.text = element_text(size = 10)
+  )
+
+```
+
+######################################## 
+
+# 7. Sector Investment Analysis
+
+######################################## 
+
+```{r sectorinvestment, echo=FALSE, fig.cap="Figure 3. Top Sectors by Total Net Present Value of Public Investment Projects"}
+#tornado
+ej_fin_sector <- ej_fin %>%
+  left_join(flujo_anual %>% select(IdProyecto, sector) %>% distinct(), by = "IdProyecto")
+
+ej_fin_sector <- ej_fin %>%
+  left_join(flujo_anual %>%
+              select(IdProyecto, sector) %>%
+              distinct(), by = "IdProyecto") %>%
+  mutate(Sector = coalesce(sector.x, sector.y)) %>%
+  select(-sector.x, -sector.y)
+
+
+top_vpn <- ej_fin_sector %>%
+  group_by(Sector) %>%
+  summarise(vpn_total = sum(vpn_neto, na.rm = TRUE)) %>%
+  arrange(desc(vpn_total)) %>%
+  slice_head(n = 10)
+
+
+
+ggplot(top_vpn, aes(x = reorder(Sector, vpn_total), y = vpn_total)) +
+  geom_col(fill = "firebrick") +
+  coord_flip() +
+  scale_y_continuous(labels = scales::comma) +
+  labs(title = "Top 10 Sectores por VPN Total",
+       x = "Sector", y = "VPN Total (RD$)")
+```
+
+######################################## 
+
+# 8. Investment Trends Over Time
+
+######################################## 
+
+```{r investment_trend, echo=FALSE, fig.cap="Figure 8. Evolution of Public Investment by Sector Over Time", fig.align="center", out.width="90%"}
+
+#resumen por sector y año
+resumen_sector_anual <- flujo_anual %>%
+  group_by(sector, AnioEjecucionPptal) %>%
+  summarise(
+    total_invested = sum(beneficio_anual, na.rm = TRUE),
+    n_projects = n_distinct(IdProyecto),
+    .groups = 'drop'
+  )
+
+#top 10 sectores por inversión total
+top10_sectores <- resumen_sector_anual %>%
+  group_by(sector) %>%
+  summarise(total = sum(total_invested, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(total)) %>%
+  slice_head(n = 10) %>%
+  pull(sector)
+
+#filtrar solo top sectores
+resumen_top <- resumen_sector_anual %>%
+  filter(sector %in% top10_sectores)
+
+#gráfico
+ggplot(resumen_top, aes(x = AnioEjecucionPptal, y = total_invested, color = sector)) +
+  
+  geom_line(linewidth = 1.2) +
+  
+  scale_y_continuous(labels = scales::comma) +
+  
+  labs(
+    title = "Evolution of Public Investment in Top 10 Sectors",
+    x = "Year",
+    y = "Total Investment (RD$)",
+    color = "Sector"
+  ) +
+  
+  theme_minimal() +
+  
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "bottom",
+    legend.text = element_text(size = 9)
+  )
+
+```
+
+######################################## 
+
+# 9. Geospatial Investment Analysis
+
+######################################## 
+
+```{r mostrar-imagen, echo=FALSE, fig.cap="Figure 9. Geographic Distribution of Public Investment by Province", fig.align="center", out.width="90%"}
+
+knitr::include_graphics("/Users/garya01/Downloads/data de analisis de mepyd/Data/images/Public-investment-for-province.png")
+
+```
+
+######################################## 
+
+# 10. Monte Carlo Simulation
+
+######################################## 
+
+Monte Carlo simulation is used to evaluate project risk.
+
+```{r montecarlo, echo=FALSE, fig.cap="Figure 10. Monte Carlo Simulation of Net Present Value for the Selected Project", fig.align="center", out.width="90%"}
+
+#1. Selección del proyecto
+proyecto_objetivo <- "HUMANIZACION DEL SISTEMA PENITENCIARIO DE LA REPÚBLICA DOMINICANA"
+
+proyecto_data <- flujo_anual %>%
+  filter(nombre_proyecto == proyecto_objetivo) %>%
+  arrange(anio_relativo)
+
+#Validación
+if(nrow(proyecto_data) == 0){
+  stop("Project not found. Check project name.")
+}
+
+#2. Parámetros
+set.seed(123)
+n_sim <- 10000
+tasa_desc <- 0.12
+
+#3. Simulación
+sim_matrix <- replicate(n_sim, {
+  
+  flujo_sim <- rnorm(
+    n = nrow(proyecto_data),
+    mean = proyecto_data$beneficio_anual,
+    sd = sd(proyecto_data$beneficio_anual, na.rm = TRUE)
+  )
+  
+  flujo_desc <- flujo_sim / ((1 + tasa_desc) ^ proyecto_data$anio_relativo)
+  
+  sum(flujo_desc, na.rm = TRUE) - unique(proyecto_data$costo_estimado)
+})
+
+#4. Estadísticas
+summary_stats <- quantile(sim_matrix, probs = c(0.05, 0.25, 0.5, 0.75, 0.95))
+mean_vpn <- mean(sim_matrix)
+prob_negativo <- mean(sim_matrix < 0)
+
+#5. Dataframe
+sim_df <- data.frame(NPV_simulated = sim_matrix)
+
+#6. Gráfico
+ggplot(sim_df, aes(x = NPV_simulated)) +
+  
+  geom_histogram(
+    bins = 60,
+    fill = "steelblue",
+    color = "white",
+    alpha = 0.9
+  ) +
+  
+  # Mediana
+  geom_vline(
+    xintercept = summary_stats["50%"],
+    color = "red",
+    linetype = "dashed",
+    linewidth = 1.1
+  ) +
+  
+  # Percentiles
+  geom_vline(xintercept = summary_stats["5%"], linetype = "dotted", color = "gray40") +
+  geom_vline(xintercept = summary_stats["95%"], linetype = "dotted", color = "gray40") +
+  
+  scale_x_continuous(labels = scales::comma) +
+  
+  labs(
+    title = "Monte Carlo Simulation of Project Net Present Value",
+    subtitle = paste0("Project: ", proyecto_objetivo,
+                      " | Prob(NPV < 0) = ", round(prob_negativo*100,2), "%"),
+    x = "Simulated Net Present Value (RD$)",
+    y = "Frequency"
+  ) +
+  
+  theme_minimal() +
+  
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    axis.text = element_text(size = 10)
+  )
+
+```
+
+######################################## 
+
+# 11. Cumulative Distribution Function
+
+######################################## 
+
+```{r cdf, echo=FALSE, fig.cap="Figure 11. Cumulative Distribution Function of Simulated Net Present Value", fig.align="center", out.width="90%"}
+
+ggplot(sim_df, aes(x = NPV_simulated)) +
+  
+  stat_ecdf(
+    geom = "step",
+    color = "darkgreen",
+    linewidth = 1.2
+  ) +
+  
+  # Mediana
+  geom_vline(
+    xintercept = summary_stats["50%"],
+    linetype = "dashed",
+    color = "red",
+    linewidth = 1
+  ) +
+  
+  scale_x_continuous(labels = scales::comma) +
+  
+  labs(
+    title = "Cumulative Distribution Function of Simulated Net Present Value",
+    subtitle = paste0("Project: ", proyecto_objetivo),
+    x = "Net Present Value (RD$)",
+    y = "Cumulative Probability"
+  ) +
+  
+  theme_minimal() +
+  
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    axis.text = element_text(size = 10)
+  )
+
+```
+
+######################################## 
+
+# 12. Conclusion
+
+######################################## 
+
+The analysis reveals substantial heterogeneity in the performance of public investment projects across sectors and regions. The Net Present Value (NPV) results indicate that while some sectors generate consistently positive returns, others exhibit lower profitability and higher dispersion.
+
+The distribution and relationship analysis suggest that project duration does not guarantee higher returns, highlighting the importance of efficient resource allocation and project management.
+
+From a risk perspective, the Monte Carlo simulation provides critical insights into the uncertainty surrounding project outcomes. The results show not only the expected range of returns but also the probability of negative NPV, offering a more comprehensive framework for decision-making under uncertainty.
+
+Overall, this analysis demonstrates the value of combining financial evaluation techniques with statistical and geospatial methods to support evidence-based public investment decisions.
+
+Future work could extend this approach by incorporating macroeconomic variables, sector-specific risk factors, and machine learning models to improve predictive accuracy.
