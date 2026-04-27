@@ -10,10 +10,14 @@ output:
     theme: cosmo
 ---
 
+########################################
+
 ## 1. Introduction
 
 This project analyzes public investment projects using data from the Ministry of Economy, Planning and Development (MEPyD).\
 The objective is to evaluate project performance using financial indicators such as Net Present Value (NPV), sector investment trends, and risk simulation using Monte Carlo methods.
+
+########################################
 
 ######################################## 
 
